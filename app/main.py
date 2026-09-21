@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
+from .audit import audit_rules
 from .correlation import (
     DEFAULT_GAP_SECONDS,
     compare_snapshot_items,
@@ -315,6 +316,42 @@ def toggle_rule(rule_id: int):
         conn.execute("UPDATE rules SET enabled=? WHERE id=?", (new_val, rule_id))
         conn.commit()
         return {"id": rule_id, "enabled": new_val}
+    finally:
+        conn.close()
+
+
+@app.get("/api/rule-audit")
+def rule_audit(rule_id: Optional[int] = None):
+    """对当前**启用**规则做静态覆盖审计（只读，绝不触碰 live/replay 数据）。
+
+    按设备/批次/级别通配、每日时段（含跨午夜）与日期范围计算每对规则的
+    可达条件交集，标出动作冲突、冷却差异、完全遮蔽与冗余重叠；结果按规则
+    id 稳定排序。可选 ``rule_id`` 只保留涉及该规则的关系。
+    """
+    conn = db.get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM rules ORDER BY priority, id").fetchall()
+        all_rules = [dict(r) for r in rows]
+        if rule_id is not None:
+            if not any(r["id"] == rule_id for r in all_rules):
+                raise HTTPException(404, "规则不存在")
+            if not any(r["id"] == rule_id and r["enabled"] for r in all_rules):
+                return {
+                    "filter_rule_id": rule_id,
+                    "filter_note": "该规则当前为停用状态，不参与评估，因此没有审计关系",
+                    **audit_rules(all_rules),
+                }
+        result = audit_rules(all_rules)
+        result["filter_rule_id"] = rule_id
+        if rule_id is None:
+            result["overlaps_filtered"] = len(result["overlaps"])
+            return result
+        filtered = [
+            o for o in result["overlaps"] if rule_id in o["rule_ids"]
+        ]
+        result["overlaps_filtered"] = len(filtered)
+        result["overlaps"] = filtered
+        return result
     finally:
         conn.close()
 
