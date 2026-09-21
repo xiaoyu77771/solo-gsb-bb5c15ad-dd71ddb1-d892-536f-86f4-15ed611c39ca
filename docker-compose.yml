@@ -1,0 +1,13 @@
+services:
+  coldchain-sandbox:
+    build: .
+    image: coldchain-suppression-sandbox:latest
+    container_name: coldchain-sandbox
+    ports:
+      - "8000:8000"
+    volumes:
+      - sandbox-data:/data
+    restart: unless-stopped
+
+volumes:
+  sandbox-data:

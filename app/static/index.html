@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>冷链告警抑制策略沙盒</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">❄️</span>
+    <div>
+      <h1>冷链告警抑制策略沙盒</h1>
+      <p class="subtitle">导入告警 · 编写抑制规则 · 观察放行/抑制决策与冷却窗口</p>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="inject">告警注入</button>
+    <button class="tab" data-tab="events">事件关联</button>
+    <button class="tab" data-tab="evolution">事件演进</button>
+    <button class="tab" data-tab="rules">抑制规则</button>
+    <button class="tab" data-tab="compare">策略对比</button>
+    <button class="tab" data-tab="receiver">模拟接收端</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ===================== 告警注入 ===================== -->
+  <section id="tab-inject" class="panel active">
+    <div class="grid-2">
+      <div class="card">
+        <h2>待注入队列 <span class="badge" id="staged-count">0</span></h2>
+        <p class="hint">队列按顺序逐条注入；注入时按<strong>当前启用规则</strong>与已累积的冷却状态评估。</p>
+        <div class="toolbar">
+          <button class="btn primary" id="btn-inject-next">▶ 注入队首 1 条</button>
+          <button class="btn" id="btn-inject-all">⏩ 全部顺序注入</button>
+          <button class="btn ghost" id="btn-undo">↩ 撤销最近注入</button>
+        </div>
+        <div id="staged-list" class="staged-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>导入告警 JSON</h2>
+        <p class="hint">接受数组 <code>[{...}]</code>，或对象 <code>{"alerts":[...], "append":true}</code>。字段：device_id / batch_id / level(info|warning|critical) / alert_type / message / ts(ISO8601，可省略)。</p>
+        <textarea id="import-json" rows="10" placeholder='[&#10;  {"device_id":"TR-01","batch_id":"B2026-09A","level":"warning","alert_type":"temp_high","message":"温度偏高","ts":"2026-09-21T00:05:00"}&#10;]'></textarea>
+        <div class="toolbar">
+          <button class="btn primary" id="btn-import">导入（替换队列）</button>
+          <button class="btn" id="btn-import-append">追加到队列</button>
+          <button class="btn ghost" id="btn-sample">填充内置示例</button>
+        </div>
+
+        <h2 style="margin-top:18px">直接注入单条</h2>
+        <textarea id="direct-json" rows="5" placeholder='{"device_id":"WH-03","level":"critical","alert_type":"power_off","message":"冷库断电"}'></textarea>
+        <div class="toolbar">
+          <button class="btn primary" id="btn-direct-inject">立即注入（不入队）</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>实时注入链决定（live run） <span class="badge pass" id="live-pass">0 放行</span> <span class="badge suppress" id="live-suppress">0 抑制</span></h2>
+      <p class="hint">冷却状态在本链上随注入累积；规则改动只影响之后的注入。撤销会删除该告警在全部评估中的记录与已投递记录。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>#</th><th>时间</th><th>设备</th><th>批次</th><th>级别</th><th>类型</th>
+            <th>内容</th><th>决定</th><th>命中规则 / 解释</th>
+          </tr></thead>
+          <tbody id="alerts-body"><tr><td colspan="9" class="empty">尚未注入告警</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 事件关联 ===================== -->
+  <section id="tab-events" class="panel">
+    <div class="card">
+      <h2>事件关联设置</h2>
+      <p class="hint">对<strong>全部已注入告警</strong>按 <code>device_id + alert_type</code> 分组，组内按告警时间排序，相邻两条时间差不超过聚合间隔即归入同一事件。
+        关联结果<strong>只取决于告警集合与间隔</strong>：乱序注入、修改间隔后重算都会得到确定性结果；事件关联独立于 live/replay 评估链，<strong>不会改变任何放行/抑制决定</strong>。</p>
+      <div class="toolbar">
+        <label style="margin:0;flex:0 0 300px">聚合间隔 gap_seconds（秒，相邻告警 &le; 间隔即同事件）
+          <input id="ev-gap" type="number" min="0" max="31622400" value="900">
+        </label>
+        <button class="btn primary" id="btn-save-gap" style="align-self:flex-end">保存间隔并重算</button>
+        <button class="btn" id="btn-recompute" style="align-self:flex-end">🔁 立即重算事件</button>
+        <span class="badge" id="ev-gap-saved" style="align-self:center"></span>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>事件列表
+        <span class="badge" id="ev-total">0 事件</span>
+        <span class="badge pass" id="ev-acked">0 已确认</span>
+        <span class="badge suppress" id="ev-unacked">0 未确认</span>
+      </h2>
+      <div class="toolbar filters">
+        <label style="margin:0">设备
+          <select id="ev-filter-device"><option value="">全部设备</option></select>
+        </label>
+        <label style="margin:0">最高级别
+          <select id="ev-filter-level">
+            <option value="">全部级别</option>
+            <option value="critical">critical</option>
+            <option value="warning">warning</option>
+            <option value="info">info</option>
+          </select>
+        </label>
+        <label style="margin:0">确认状态
+          <select id="ev-filter-status">
+            <option value="">全部</option>
+            <option value="unacknowledged">未确认</option>
+            <option value="acknowledged">已确认</option>
+          </select>
+        </label>
+        <label style="margin:0">时间起<br><input id="ev-filter-start" type="datetime-local"></label>
+        <label style="margin:0">时间止<br><input id="ev-filter-end" type="datetime-local"></label>
+        <button class="btn ghost" id="btn-clear-filters" style="align-self:flex-end">清除筛选</button>
+      </div>
+      <p class="hint">时间筛选取<strong>时间区间有重叠</strong>的事件；每个事件可展开查看成员序号与完整时间线（含 live 链决定）。</p>
+      <div id="events-list" class="event-list"></div>
+    </div>
+  </section>
+
+  <!-- ===================== 事件演进 ===================== -->
+  <section id="tab-evolution" class="panel">
+    <div class="card">
+      <h2>事件快照 <span class="badge" id="snap-total">0</span></h2>
+      <p class="hint">把<strong>当前</strong>事件关联结果保存为<strong>不可变快照</strong>：记录聚合间隔、每个事件的成员告警序号、确认状态与生成时间。
+        保存后撤销告警、调整聚合间隔或重算事件都<strong>不会改写</strong>历史快照（仅「恢复出厂」会随全部业务数据一并清空）。</p>
+      <div class="toolbar">
+        <input id="snap-note" placeholder="快照说明（可选），如：调整间隔前">
+        <button class="btn primary" id="btn-snapshot">📸 保存当前事件为快照</button>
+      </div>
+      <div id="snapshot-list" class="snapshot-list"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>快照对比（事件血缘）</h2>
+      <p class="hint">任选两个快照，按<strong>成员交集</strong>建立确定性血缘：无交集的新/旧事件分别标记「新增 / 消失」；旧事件重叠多个新事件标记「拆分」，
+        新事件重叠多个旧事件标记「合并」（两者可同时出现）；其余有交集的标记「延续」；成员完全相同但确认状态变化的单独标记「确认变化」。
+        结果按新事件首时间、旧事件 ID 稳定排序，与对比发起时机无关。</p>
+      <div class="toolbar" style="align-items:flex-end">
+        <label style="margin:0;flex:1;min-width:220px">旧快照（from）
+          <select id="snap-from"></select>
+        </label>
+        <label style="margin:0;flex:1;min-width:220px">新快照（to）
+          <select id="snap-to"></select>
+        </label>
+        <button class="btn primary" id="btn-compare-snap">⇄ 对比</button>
+        <label class="checkbox" style="margin:0 0 4px"><input type="checkbox" id="snap-only-changed"> 仅看变化</label>
+      </div>
+      <div id="snap-summary" class="summary"></div>
+      <div id="snap-relations" class="relation-list"></div>
+    </div>
+  </section>
+
+  <!-- ===================== 抑制规则 ===================== -->
+  <section id="tab-rules" class="panel">
+    <div class="card">
+      <h2 id="form-title">新建抑制规则</h2>
+      <input type="hidden" id="rule-id">
+      <div class="form-grid">
+        <label>规则名称 *<input id="f-name" placeholder="例：夜间温度抖动抑制"></label>
+        <label>动作
+          <select id="f-action">
+            <option value="suppress">suppress（命中即抑制）</option>
+            <option value="pass">pass（放行，可配冷却）</option>
+          </select>
+        </label>
+        <label>显式优先级 *（数字越小越优先）<input id="f-priority" type="number" value="100" min="0"></label>
+        <label>冷却窗口 cooldown_seconds（仅 pass 生效）<input id="f-cooldown" type="number" value="0" min="0"></label>
+        <label>设备 device_id（空=通配）<input id="f-device" placeholder="TR-01"></label>
+        <label>批次 batch_id（空=通配）<input id="f-batch" placeholder="B2026-09A"></label>
+        <label>级别 level（空=通配）
+          <select id="f-level">
+            <option value="">全部级别</option>
+            <option value="info">info</option>
+            <option value="warning">warning</option>
+            <option value="critical">critical</option>
+          </select>
+        </label>
+        <label>每日时段起 HH:MM（空=全天）<input id="f-time-start" placeholder="22:00"></label>
+        <label>每日时段止 HH:MM（起&gt;止=跨午夜）<input id="f-time-end" placeholder="06:00"></label>
+        <label>生效起始日期（可选）<input id="f-date-start" type="date"></label>
+        <label>生效截止日期（可选）<input id="f-date-end" type="date"></label>
+      </div>
+      <label class="full">描述<input id="f-desc" placeholder="规则意图，便于团队评审"></label>
+      <label class="checkbox"><input id="f-enabled" type="checkbox" checked> 启用</label>
+      <div class="toolbar">
+        <button class="btn primary" id="btn-save-rule">保存规则</button>
+        <button class="btn ghost" id="btn-cancel-edit">清空表单</button>
+      </div>
+      <p class="hint">匹配语义：设备 / 批次 / 级别为<strong>精确匹配</strong>（空或 * 通配）；时间段为每日循环窗口，支持跨午夜。所有启用规则按 (priority, id) 排序，首个匹配者决定动作；无匹配则默认放行。pass 规则在冷却窗口内对相同 <code>设备|批次|级别|类型</code> 指纹的后续告警执行抑制。</p>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>规则列表（按评估顺序）</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>顺序</th><th>名称</th><th>动作</th><th>优先级</th><th>冷却(s)</th>
+            <th>设备</th><th>批次</th><th>级别</th><th>时段</th><th>日期范围</th><th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody id="rules-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 策略对比 ===================== -->
+  <section id="tab-compare" class="panel">
+    <div class="card">
+      <h2>策略变更前后对比</h2>
+      <p class="hint">先在「告警注入」页顺序注入若干告警（即 live 链 / 变更前），再到「抑制规则」页调整规则，点击下方按钮生成一次<strong>全新回放</strong>（用当前规则快照、重置冷却状态重放全部已注入告警，不会转发）。选择两个评估版本即可逐条对比决定差异。</p>
+      <div class="toolbar">
+        <input id="replay-note" placeholder="本次回放说明，如：关闭夜间抑制规则后">
+        <button class="btn primary" id="btn-replay">🔁 用当前规则生成回放</button>
+      </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:16px">
+      <div class="card">
+        <h3>选择对比版本</h3>
+        <label>版本 A（通常选新回放）<select id="cmp-a"></select></label>
+        <label>版本 B（通常选 live 变更前）<select id="cmp-b"></select></label>
+        <div id="cmp-summary" class="summary"></div>
+      </div>
+      <div class="card">
+        <h3>版本 A 的规则快照</h3>
+        <div id="cmp-snapshot" class="snapshot"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>逐条对比</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>#</th><th>设备/批次</th><th>级别/类型</th><th>时间</th>
+            <th>版本 A 决定</th><th>A 命中解释</th><th>版本 B 决定</th><th>B 命中解释</th><th>差异</th>
+          </tr></thead>
+          <tbody id="compare-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 模拟接收端 ===================== -->
+  <section id="tab-receiver" class="panel">
+    <div class="grid-2">
+      <div class="card">
+        <h2>转发设置</h2>
+        <p class="hint">放行（pass）的告警在<strong>实时注入</strong>时转发；抑制的告警与策略回放均不会转发。默认使用内置模拟接收端，无需任何第三方账号。</p>
+        <label class="checkbox"><input type="checkbox" id="set-forward"> 启用自动转发放行告警</label>
+        <label>接收端类型
+          <select id="set-mode">
+            <option value="mock">内置模拟接收端（落库展示）</option>
+            <option value="external">外部 webhook（POST JSON）</option>
+          </select>
+        </label>
+        <label>外部 webhook URL<input id="set-url" placeholder="http://receiver:9000/mock-webhook"></label>
+        <div class="toolbar">
+          <button class="btn primary" id="btn-save-settings">保存设置</button>
+          <button class="btn" id="btn-test-mock">向内置接收端发测试包</button>
+        </div>
+        <p class="hint">连通性自测：<code>curl -X POST http://localhost:8000/mock-webhook -H 'Content-Type: application/json' -d '{"hello":"cold-chain"}'</code></p>
+      </div>
+
+      <div class="card">
+        <h2>接收端投递日志 <button class="btn ghost small" id="btn-clear-logs">清空</button></h2>
+        <div id="receiver-logs" class="log-list"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
