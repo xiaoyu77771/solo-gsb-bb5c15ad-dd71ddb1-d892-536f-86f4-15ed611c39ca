@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db
+from .audit import audit_rules, filter_audit
 from .correlation import (
     DEFAULT_GAP_SECONDS,
     compare_snapshot_items,
@@ -315,6 +316,34 @@ def toggle_rule(rule_id: int):
         conn.execute("UPDATE rules SET enabled=? WHERE id=?", (new_val, rule_id))
         conn.commit()
         return {"id": rule_id, "enabled": new_val}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 规则审计（只读：只基于当前启用规则做静态可达性/覆盖分析，
+# 不写入任何表，不触碰 alerts / decisions / runs / events / 快照）
+# ---------------------------------------------------------------------------
+
+@app.get("/api/rule-audit")
+def rule_audit(rule_id: Optional[int] = None):
+    """对启用规则做覆盖审计：两两可达条件交集、动作/冷却冲突、完全遮蔽规则。
+
+    - 按 (priority, id) 评估顺序两两比较设备/批次/级别通配、每日时段
+      （含跨午夜）与日期范围的交集；
+    - 标出被高优先级规则单条或多条并集完全遮蔽（永远不会命中）的规则；
+    - 结果按规则 id 稳定排序；可用 ``rule_id`` 只看涉及某条规则的结果。
+    """
+    conn = db.get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM rules").fetchall()
+        report = audit_rules([dict(r) for r in rows])
+        if rule_id is not None:
+            if not conn.execute("SELECT 1 FROM rules WHERE id=?", (rule_id,)).fetchone():
+                raise HTTPException(404, "规则不存在")
+            report = filter_audit(report, rule_id)
+        report["audited_at"] = datetime.now().isoformat(timespec="seconds")
+        return report
     finally:
         conn.close()
 

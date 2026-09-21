@@ -22,6 +22,7 @@ let state = {
   events: { events: [], devices: [], gap_seconds: 900 },
   snapshots: [],
   snapCompare: { from: null, to: null, result: null },
+  audit: { report: null, ruleId: null, onlyImpact: true },
 };
 
 function eventFilters() {
@@ -603,8 +604,144 @@ async function saveRule() {
     fillRuleForm(null);
     await loadRules();
     renderRules();
-    toast(id ? "规则已更新（提示：可到「策略对比」生成回放查看影响）" : "规则已创建");
+    await loadAudit();
+    toast(id ? "规则已更新（已重新审计；提示：可到「策略对比」生成回放查看影响）" : "规则已创建（已重新审计）");
   } catch (e) { fail(e); }
+}
+
+// ---------------------------------------------------------------------------
+// Tab 3.5: 规则审计
+// ---------------------------------------------------------------------------
+
+const AUDIT_KIND_LABEL = {
+  shadow_action: "完全遮蔽 · 动作相反",
+  shadow_cooldown: "完全遮蔽 · 冷却差异",
+  shadow_same_action: "完全遮蔽 · 动作一致",
+  overlap_action: "条件交集 · 动作冲突",
+  overlap_cooldown: "条件交集 · 冷却差异",
+  overlap_consistent: "条件交集 · 动作一致",
+};
+
+function ruleConditionsText(r) {
+  const dev = r.match_device || "*", batch = r.match_batch || "*";
+  const lvl = r.match_level || "*";
+  const tm = r.time_start ? `${r.time_start}-${r.time_end}` : "全天";
+  const dt = (r.date_start || r.date_end)
+    ? `${r.date_start || "…"}~${r.date_end || "…"}` : "不限日期";
+  const cd = r.action === "pass" ? ` · 冷却 ${r.cooldown_seconds}s` : "";
+  return `设备 ${dev} · 批次 ${batch} · 级别 ${lvl} · 时段 ${tm} · ${dt} · 优先级 ${r.priority}${cd}`;
+}
+
+function rulePairLine(r, cls, tag) {
+  const action = r.action === "pass"
+    ? '<span class="decision pass small">pass</span>'
+    : '<span class="decision suppress small">suppress</span>';
+  return `<div class="audit-rule-line">
+    <span class="${cls}">${tag} #${r.id}「${esc(r.name)}」</span> ${action}
+    <div style="color:var(--muted);margin-top:2px">${esc(ruleConditionsText(r))}</div>
+  </div>`;
+}
+
+function renderAuditFilterOptions() {
+  const sel = $("#audit-filter-rule");
+  const report = state.audit.report;
+  if (!report) return;
+  const current = String(state.audit.ruleId || "");
+  sel.innerHTML = '<option value="">全部启用规则</option>' +
+    report.rules.map((r) =>
+      `<option value="${r.id}">#${r.id} ${esc(r.name)}（优先级 ${r.priority}）</option>`).join("");
+  sel.value = current;
+}
+
+async function loadAudit() {
+  const params = new URLSearchParams();
+  if (state.audit.ruleId) params.set("rule_id", state.audit.ruleId);
+  const qs = params.toString();
+  state.audit.report = await api(`/api/rule-audit${qs ? `?${qs}` : ""}`);
+  renderAudit();
+}
+
+function renderAudit() {
+  const report = state.audit.report;
+  if (!report) return;
+  renderAuditFilterOptions();
+  const s = report.summary;
+  $("#audit-time").textContent = report.audited_at ? `审计于 ${report.audited_at}` : "";
+  $("#audit-summary").innerHTML =
+    `启用规则 <b>${s.enabled_rules}</b> 条 · 覆盖关系 <b>${s.relations}</b> 组 ·
+     完全遮蔽 <b style="color:var(--red)">${s.full_shadows}</b> ·
+     动作冲突 <b style="color:var(--amber)">${s.action_conflicts}</b> ·
+     冷却差异 <b>${s.cooldown_conflicts}</b> ·
+     被遮蔽规则 <b style="color:var(--red)">${s.shadowed_rules}</b> 条
+     ${report.filtered_rule_id ? ` · 当前筛选：涉及规则 <b>#${report.filtered_rule_id}</b>` : ""}`;
+
+  // 被完全遮蔽的规则
+  const shadowBox = $("#audit-shadowed");
+  const shadowed = report.shadowed;
+  $("#audit-shadow-count").textContent = `${shadowed.length} 条`;
+  if (!shadowed.length) {
+    shadowBox.innerHTML = '<p class="empty" style="padding:14px">没有规则被完全遮蔽，所有启用规则在其条件空间内都可能被命中。</p>';
+  } else {
+    shadowBox.innerHTML = shadowed.map((sh) => {
+      const cls = sh.changes_outcome ? "" : "no-impact";
+      const mode = sh.mode === "direct"
+        ? '<span class="audit-kind kind-shadow_action">单条遮蔽</span>'
+        : '<span class="audit-kind kind-overlap_action">并集遮蔽</span>';
+      const impact = sh.changes_outcome
+        ? '<span class="badge suppress">遮蔽后结果改变</span>'
+        : '<span class="badge">结果不变（冗余）</span>';
+      const action = sh.action === "pass"
+        ? '<span class="decision pass small">pass</span>'
+        : '<span class="decision suppress small">suppress</span>';
+      return `<div class="shadow-card ${sh.mode} ${cls}">
+        <div class="shadow-head">
+          <b>#${sh.rule_id} ${esc(sh.name)}</b> ${action}
+          <span class="badge">优先级 ${sh.priority}</span>
+          ${mode} ${impact}
+        </div>
+        <div class="shadow-reason">${esc(sh.reason)}</div>
+        <div class="shadow-by">覆盖它的高优先级规则：${
+          sh.shadowed_by.map((id) => `<b>#${id}</b>`).join("、")
+        }</div>
+      </div>`;
+    }).join("");
+  }
+
+  // 覆盖关系表
+  const onlyImpact = $("#audit-only-impact").checked;
+  const rows = report.relations.filter((rel) => !onlyImpact || rel.changes_outcome);
+  const tbody = $("#audit-body");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4" class="empty">${
+      report.relations.length
+        ? "当前筛选下没有“可能改变结果”的覆盖关系（取消勾选可查看全部重叠）。"
+        : "启用规则之间不存在条件交集；所有规则的可达条件互不重叠。"
+    }</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map((rel) => {
+    const hi = rel.higher, lo = rel.lower;
+    const rowCls = rel.full_shadow ? "row-shadow" : (rel.changes_outcome ? "" : "row-no-impact");
+    const impactBadge = rel.changes_outcome
+      ? '<span class="badge suppress">可能改变结果</span>'
+      : '<span class="badge">结果不变</span>';
+    const iv = rel.intersection;
+    return `<tr class="${rowCls}">
+      <td class="audit-pair">
+        <div><span class="pair-hi">#${hi.id}</span> 优先于 <span class="pair-lo">#${lo.id}</span></div>
+        ${rel.full_shadow ? '<div style="margin-top:4px"><span class="audit-kind kind-shadow_action">完全遮蔽</span></div>' : ""}
+      </td>
+      <td><span class="audit-kind kind-${rel.kind}">${AUDIT_KIND_LABEL[rel.kind] || rel.kind}</span>
+        <div style="margin-top:5px">${impactBadge}</div></td>
+      <td class="audit-inter">${esc(iv.summary)}<div style="color:var(--muted);margin-top:3px">
+        日期：<code>${esc(iv.date_label)}</code> · ${esc(iv.time_label)}</div></td>
+      <td style="max-width:430px">
+        ${rulePairLine(hi, "pair-hi", "高优")}
+        ${rulePairLine(lo, "pair-lo", "低优")}
+        <div class="audit-note">${esc(rel.note)}</div>
+      </td>
+    </tr>`;
+  }).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +938,11 @@ document.addEventListener("click", async (e) => {
     if (r) { fillRuleForm(r); window.scrollTo({ top: 0, behavior: "smooth" }); }
   }
   if (ds.toggleRule) {
-    try { await api(`/api/rules/${ds.toggleRule}/toggle`, { method: "POST" }); await loadRules(); renderRules(); }
+    try {
+      await api(`/api/rules/${ds.toggleRule}/toggle`, { method: "POST" });
+      await loadRules(); renderRules();
+      await loadAudit();
+    }
     catch (err) { fail(err); }
   }
   if (ds.delRule) {
@@ -809,7 +950,9 @@ document.addEventListener("click", async (e) => {
     try {
       await api(`/api/rules/${ds.delRule}`, { method: "DELETE" });
       if (Number($("#rule-id").value) === Number(ds.delRule)) fillRuleForm(null);
+      if (state.audit.ruleId === Number(ds.delRule)) state.audit.ruleId = null;
       await loadRules(); renderRules();
+      await loadAudit();
     } catch (err) { fail(err); }
   }
 });
@@ -823,6 +966,7 @@ function bind() {
     if (btn.dataset.tab === "receiver") loadReceiverLogs();
     if (btn.dataset.tab === "events") loadEvents().catch(fail);
     if (btn.dataset.tab === "evolution") loadSnapshots().catch(fail);
+    if (btn.dataset.tab === "audit") loadAudit().catch(fail);
   }));
 
   $("#btn-inject-next").addEventListener("click", () => doInject(true));
@@ -852,6 +996,13 @@ function bind() {
   });
   $("#btn-save-rule").addEventListener("click", saveRule);
   $("#btn-cancel-edit").addEventListener("click", () => fillRuleForm(null));
+  $("#btn-audit-refresh").addEventListener("click", () =>
+    loadAudit().then(() => toast("已按当前规则重新审计")).catch(fail));
+  $("#audit-filter-rule").addEventListener("change", (e) => {
+    state.audit.ruleId = e.target.value ? Number(e.target.value) : null;
+    loadAudit().catch(fail);
+  });
+  $("#audit-only-impact").addEventListener("change", renderAudit);
   $("#btn-replay").addEventListener("click", doReplay);
   $("#cmp-a").addEventListener("change", loadCompare);
   $("#cmp-b").addEventListener("change", loadCompare);

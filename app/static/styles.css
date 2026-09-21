@@ -266,3 +266,35 @@ tr:hover td { background: rgba(56, 189, 248, 0.04); }
   .rel-sides { grid-template-columns: 1fr; }
   .rel-arrow { display: none; }
 }
+
+/* ---------------- 规则审计 ---------------- */
+.shadow-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.shadow-card {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); padding: 11px 14px;
+  border-left: 3px solid var(--red);
+}
+.shadow-card.union { border-left-color: var(--amber); }
+.shadow-card.no-impact { border-left-color: var(--muted); opacity: 0.9; }
+.shadow-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.shadow-head b { font-size: 14px; }
+.shadow-reason { color: var(--muted); font-size: 12.5px; }
+.shadow-by { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+.audit-kind { font-weight: 700; padding: 2px 10px; border-radius: 6px; font-size: 12px; white-space: nowrap; }
+.kind-shadow_action { background: var(--red-bg); color: var(--red); }
+.kind-shadow_cooldown { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+.kind-shadow_same_action { background: rgba(142, 162, 184, 0.18); color: var(--muted); }
+.kind-overlap_action { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+.kind-overlap_cooldown { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+.kind-overlap_consistent { background: rgba(142, 162, 184, 0.18); color: var(--muted); }
+
+.audit-inter { font-size: 12.5px; color: var(--text); line-height: 1.7; }
+.audit-inter code { white-space: nowrap; }
+.audit-pair { white-space: nowrap; font-size: 12.5px; }
+.audit-pair .pair-hi { color: var(--green); font-weight: 700; }
+.audit-pair .pair-lo { color: var(--red); font-weight: 700; }
+.audit-rule-line { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.audit-note { color: var(--muted); font-size: 12px; margin-top: 5px; }
+tr.row-shadow td { background: rgba(248, 113, 113, 0.05); }
+tr.row-no-impact { opacity: 0.82; }

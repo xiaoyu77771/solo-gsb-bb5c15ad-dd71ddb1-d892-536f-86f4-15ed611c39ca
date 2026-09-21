@@ -20,6 +20,7 @@
     <button class="tab" data-tab="events">事件关联</button>
     <button class="tab" data-tab="evolution">事件演进</button>
     <button class="tab" data-tab="rules">抑制规则</button>
+    <button class="tab" data-tab="audit">规则审计</button>
     <button class="tab" data-tab="compare">策略对比</button>
     <button class="tab" data-tab="receiver">模拟接收端</button>
   </nav>
@@ -204,6 +205,44 @@
             <th>设备</th><th>批次</th><th>级别</th><th>时段</th><th>日期范围</th><th>状态</th><th>操作</th>
           </tr></thead>
           <tbody id="rules-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 规则审计 ===================== -->
+  <section id="tab-audit" class="panel">
+    <div class="card">
+      <h2>规则覆盖审计</h2>
+      <p class="hint">对<strong>当前启用</strong>规则做静态可达性分析：按设备 / 批次 / 级别通配、每日时段（含跨午夜）与日期范围计算两两规则的<strong>条件交集</strong>，
+        标出交集内<strong>动作或冷却窗口可能改变结果</strong>的覆盖关系，以及被高优先级规则（单条或多条并集）<strong>完全遮蔽、永远不会命中</strong>的规则。
+        审计结果只取决于当前规则集合，<strong>不写入任何数据、不影响 live/replay 历史决定</strong>；规则增删改后点击「重新审计」即可刷新。</p>
+      <div class="toolbar filters">
+        <label style="margin:0">只看涉及规则
+          <select id="audit-filter-rule"><option value="">全部启用规则</option></select>
+        </label>
+        <label class="checkbox" style="margin:0 0 4px"><input type="checkbox" id="audit-only-impact" checked> 仅看可能改变结果的覆盖关系</label>
+        <button class="btn primary" id="btn-audit-refresh">🔁 重新审计</button>
+        <span class="badge" id="audit-time"></span>
+      </div>
+      <div id="audit-summary" class="summary"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>被完全遮蔽的规则（永远不会命中） <span class="badge suppress" id="audit-shadow-count">0</span></h2>
+      <p class="hint">这些规则的全部可达条件都已被更优先的规则覆盖，评估引擎按 <code>(priority, id)</code> 排序后永远走不到它们；
+        “并集遮蔽”表示需要多条高优先级规则联合才能完全覆盖。</p>
+      <div id="audit-shadowed" class="shadow-list"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>规则覆盖关系（按规则 id 稳定排序）</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>规则对</th><th>冲突类型</th><th>交集条件摘要</th><th>涉及规则与说明</th>
+          </tr></thead>
+          <tbody id="audit-body"></tbody>
         </table>
       </div>
     </div>
